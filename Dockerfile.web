@@ -1,0 +1,11 @@
+FROM nginx:1.27-alpine
+
+# 单页前端
+COPY web/index.html /usr/share/nginx/html/index.html
+# 站点与反代配置（含 /health 与 /api/ 转发）
+COPY web/nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=6 \
+    CMD wget -q -O- http://127.0.0.1/health | grep -q '"status":"ok"' || exit 1

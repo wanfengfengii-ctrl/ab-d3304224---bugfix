@@ -1,0 +1,61 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: seabed-observer-api:latest
+    container_name: seabed-observer-api
+    ports:
+      # API 宿主机端口可通过 API_HOST_PORT 配置
+      - "${API_HOST_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 8s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: seabed-observer-web:latest
+    container_name: seabed-observer-web
+    environment:
+      WEB_HOST_PORT: ${WEB_HOST_PORT:-8080}
+    ports:
+      # Web 宿主机端口可通过 WEB_HOST_PORT 配置
+      - "${WEB_HOST_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # Web 健康检查同时验证自身静态服务与到 API 的反代链路
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/health | grep -q '\"status\":\"ok\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 8s
+    restart: unless-stopped
+
+  verify:
+    # 一次性验收服务：构建 -> 代码测试 -> 经 Web 反代完成 API 业务冒烟后自行退出，
+    # 以退出码报告验收结果（0 通过 / 非 0 失败）。
+    # 运行：
+    #   docker compose up --build --abort-on-container-exit --exit-code-from verify verify
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: seabed-observer-api:latest
+    container_name: seabed-observer-verify
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    environment:
+      # 冒烟流量经 Nginx（静态页 + /api 反代），与真实访问路径一致
+      BASE_URL: http://web
+    command: ["sh", "scripts/verify.sh"]
+    restart: "no"
