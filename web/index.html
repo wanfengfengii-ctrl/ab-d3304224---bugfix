@@ -328,7 +328,7 @@ function showError(detail) {
     else text = JSON.stringify(detail, null, 2);
   } catch { text = String(detail); }
   box.className = "api-error";
-  box.textContent = "请求未通过校验：\n" + text;
+  box.textContent = "请求未完成：\n" + text;
   box.hidden = false;
 }
 
@@ -356,12 +356,19 @@ async function saveAndDiagnose() {
   if (rec) {
     state.draftId = rec.id;
     state.revision = rec.revision;
+    // 新建/改稿后服务器已清除旧结论：先撤下结果区，避免展示旧修订的结论
+    $("#result-card").hidden = true;
   }
   state.dirty = false;
   $("#stale-note").hidden = true;
   $("#draft-status").textContent =
     `草稿 ${state.draftId} · 修订版本 r${state.revision}（旧结论已随改稿清除）`;
   const result = await api("POST", `/api/drafts/${state.draftId}/diagnose`);
+  if (result.revision !== state.revision) {
+    // 归因计算期间草稿已被修改：旧修订的结论已作废，不得作为当前结果展示
+    showError(`归因结论基于旧修订 r${result.revision}，与当前草稿修订 r${state.revision} 不一致，已作废；请重新发起归因。`);
+    return;
+  }
   renderResult(result);
 }
 

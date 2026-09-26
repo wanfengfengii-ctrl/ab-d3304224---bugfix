@@ -1,6 +1,8 @@
-"""API 集成测试：草稿生命周期、归因、改稿废弃旧结论、健康检查。"""
+"""API 集成测试：草稿生命周期、归因、改稿废弃旧结论、并发改稿竞争、健康检查。"""
 
 from __future__ import annotations
+
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -37,6 +39,33 @@ def sample_payload():
             {"closed": ["C1", "C2", "C3", "C4", "C5", "C6"],
              "readings": {"S": True, "A": True, "B": True, "C": True, "D": True}},
         ],
+    }
+
+
+def max_payload_all_powered():
+    """10 节点、14 电缆、7 轮且每轮全部节点通电的草稿（枚举规模最大）。"""
+    nodes = ["S"] + [f"N{i}" for i in range(1, 10)]
+    edge_pairs = [
+        ("S", "N1"), ("N1", "N2"), ("N2", "N3"), ("N3", "N4"),
+        ("N4", "N5"), ("N5", "N6"), ("N6", "N7"), ("N7", "N8"),
+        ("N8", "N9"), ("N9", "S"),
+        ("S", "N5"), ("N2", "N7"), ("N1", "N4"), ("N6", "N9"),
+    ]
+    cables = [
+        {"name": f"E{i + 1}", "u": u, "v": v, "repair_risk": float((i % 5) + 1)}
+        for i, (u, v) in enumerate(edge_pairs)
+    ]
+    all_closed = [c["name"] for c in cables]
+    rounds = [
+        {"closed": list(all_closed), "readings": {n: True for n in nodes}}
+        for _ in range(7)
+    ]
+    return {
+        "name": "大规模-全通电",
+        "nodes": nodes,
+        "source": "S",
+        "cables": cables,
+        "rounds": rounds,
     }
 
 
@@ -160,3 +189,77 @@ def test_extra_fields_rejected():
     p["bogus"] = 1
     r = client.post("/api/drafts", json=p)
     assert r.status_code == 422
+
+
+def test_concurrent_diagnose_discarded_after_mid_flight_update(monkeypatch):
+    """并发改稿场景：r1 上在途的归因，在改稿为 r2 后不得成为保存/页面结果。
+
+    场景（对应缺陷报告）：对 r1 并发发起多次归因；这些请求尚未完成时
+    将草稿更新为内容不同的 r2，且不再为 r2 发起归因。此后：
+    - 在途归因一律作废（409），不得保存为 r2 的结论；
+    - 读取归因结果必须返回 409，草稿不得携带 r1 的旧结论；
+    - 重新对 r2 归因后恢复正常。
+    """
+    from app import routers
+
+    draft_id = client.post("/api/drafts", json=max_payload_all_powered()).json()["id"]
+
+    real_diagnose = routers.diagnose
+    workers = 3
+    entered = threading.Barrier(workers + 1)
+    release = threading.Event()
+
+    def gated_diagnose(network):
+        # 全部并发归因都基于 r1 进入计算后，阻塞到改稿完成再返回结果
+        entered.wait(timeout=15)
+        assert release.wait(timeout=15), "改稿未在预期时间内完成"
+        return real_diagnose(network)
+
+    monkeypatch.setattr(routers, "diagnose", gated_diagnose)
+
+    outcomes: list[tuple[int, dict]] = []
+
+    def worker():
+        r = client.post(f"/api/drafts/{draft_id}/diagnose")
+        outcomes.append((r.status_code, r.json()))
+
+    threads = [threading.Thread(target=worker) for _ in range(workers)]
+    for t in threads:
+        t.start()
+
+    # 等待所有归因请求基于 r1 开始计算（快照已在 PUT 之前完成）
+    entered.wait(timeout=15)
+
+    # 在途期间将草稿更新为内容不同的 r2，且不再为 r2 发起归因
+    p2 = max_payload_all_powered()
+    p2["rounds"][0]["readings"]["N9"] = False
+    upd = client.put(f"/api/drafts/{draft_id}", json=p2)
+    assert upd.status_code == 200
+    assert upd.json()["revision"] == 2
+    assert upd.json()["diagnosis"] is None
+
+    release.set()
+    for t in threads:
+        t.join(timeout=30)
+    assert len(outcomes) == workers
+
+    # 在途归因全部作废：不得返回可展示的旧修订结论
+    assert [s for s, _ in outcomes] == [409] * workers
+    for _, body in outcomes:
+        assert "作废" in body["detail"]
+
+    # 未对 r2 重新归因：读取必须 409，草稿不得携带 r1 的结论
+    assert client.get(f"/api/drafts/{draft_id}/diagnosis").status_code == 409
+    rec = client.get(f"/api/drafts/{draft_id}").json()
+    assert rec["revision"] == 2
+    assert rec["diagnosis"] is None
+    assert rec["diagnosis_revision"] is None
+
+    # 恢复真实引擎后，对 r2 重新归因可正常保存与读取
+    monkeypatch.setattr(routers, "diagnose", real_diagnose)
+    d = client.post(f"/api/drafts/{draft_id}/diagnose")
+    assert d.status_code == 200
+    assert d.json()["revision"] == 2
+    got = client.get(f"/api/drafts/{draft_id}/diagnosis")
+    assert got.status_code == 200
+    assert got.json()["revision"] == 2

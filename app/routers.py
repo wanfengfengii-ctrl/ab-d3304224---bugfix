@@ -101,15 +101,24 @@ def update_draft(draft_id: str, body: dict) -> dict:
 
 @router.post("/drafts/{draft_id}/diagnose")
 def run_diagnosis(draft_id: str) -> dict:
-    """对当前草稿发起归因；结论绑定当前修订号。"""
-    rec = store.get(draft_id)
-    if rec is None:
+    """对当前草稿发起归因；结论绑定发起时的修订号。
+
+    归因计算期间若草稿被并发修改（修订号已递增），本次结论属于旧修订：
+    不保存、不作为当前结果返回，直接以 409 作废，须基于新修订重新发起。
+    """
+    snapshot = store.get_snapshot(draft_id)
+    if snapshot is None:
         raise HTTPException(status_code=404, detail="草稿不存在")
-    network = build_network(rec.payload)
+    draft_payload, revision = snapshot
+    network = build_network(draft_payload)
     result = diagnose(network)
     payload = diagnosis_to_dict(result)
-    payload["revision"] = rec.revision
-    store.attach_diagnosis(draft_id, payload)
+    payload["revision"] = revision
+    if store.attach_diagnosis(draft_id, payload, revision) is None:
+        raise HTTPException(
+            status_code=409,
+            detail="归因计算期间草稿已被修改，该结论已作废；请基于当前草稿重新发起归因",
+        )
     return payload
 
 
@@ -118,7 +127,8 @@ def get_diagnosis(draft_id: str) -> dict:
     rec = store.get(draft_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="草稿不存在")
-    if rec.diagnosis is None:
+    # 结论必须属于当前修订：改稿后未重新归因（或旧结论已被废弃）时返回 409
+    if rec.diagnosis is None or rec.diagnosis_revision != rec.revision:
         raise HTTPException(status_code=409, detail="当前草稿尚无归因结论，请先发起归因")
     return rec.diagnosis
 

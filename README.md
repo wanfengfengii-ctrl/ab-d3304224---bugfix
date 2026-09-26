@@ -18,6 +18,9 @@
 - 若没有任何组合能同时解释全部轮次，明确返回
   **「这些试验读数不能由同一组永久故障同时解释」**；
   修改草稿后修订号 +1，**旧结论立即作废、不保留**，须重新发起归因。
+- 归因结论绑定**发起时的修订号**：计算期间草稿被并发修改的，
+  该次在途结论作废（409），**不会保存为新修订的结论**，
+  页面也不得展示旧修订的结论。
 
 ## 技术栈
 
@@ -73,8 +76,8 @@ BASE_URL=http://127.0.0.1:8000 python scripts/smoke.py
 | `POST /api/drafts` | 创建草稿（严格校验所有业务约束） |
 | `GET /api/drafts/{id}` | 查看草稿（含修订号与当前结论） |
 | `PUT /api/drafts/{id}` | 修改草稿：修订号 +1 并清除旧结论 |
-| `POST /api/drafts/{id}/diagnose` | 对当前草稿发起归因并保存结论 |
-| `GET /api/drafts/{id}/diagnosis` | 查询最近一次归因（无结论时 409） |
+| `POST /api/drafts/{id}/diagnose` | 对当前草稿发起归因并保存结论（计算期间改稿则该次结论作废，返回 409） |
+| `GET /api/drafts/{id}/diagnosis` | 查询最近一次归因（无结论或结论不属于当前修订时 409） |
 | `POST /api/diagnose` | 无状态归因（直接提交、直接计算） |
 
 归因响应包含：
@@ -97,7 +100,7 @@ app/               FastAPI 应用
 web/               单页录入界面
   index.html
   nginx.conf       Web 容器站点配置（静态托管 + /api 反代 + /health）
-tests/             pytest 测试（17 项）
+tests/             pytest 测试（21 项）
 scripts/           smoke.py 业务冒烟；verify.sh 验收入口
 Dockerfile         API 镜像（FastAPI/uvicorn，同时供 verify 使用）
 Dockerfile.web     Web 镜像（Nginx）
