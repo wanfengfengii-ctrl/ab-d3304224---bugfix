@@ -340,7 +340,12 @@ async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) { showError(data.detail || res.statusText); throw new Error(res.statusText); }
+  if (!res.ok) {
+    showError(data.detail || res.statusText);
+    const err = new Error(res.statusText);
+    err.status = res.status;
+    throw err;
+  }
   showError(null);
   return data;
 }
@@ -352,6 +357,9 @@ async function saveAndDiagnose() {
     rec = await api("POST", "/api/drafts", payload);
   } else if (state.dirty) {
     rec = await api("PUT", `/api/drafts/${state.draftId}`, payload);
+    // 改稿成功即修订号 +1：页面上此前展示的 r1 结论立即作废，先清除，
+    // 绝不允许旧结论停留在页面上被当成新草稿的结果。
+    $("#result-card").hidden = true;
   }
   if (rec) {
     state.draftId = rec.id;
@@ -361,8 +369,30 @@ async function saveAndDiagnose() {
   $("#stale-note").hidden = true;
   $("#draft-status").textContent =
     `草稿 ${state.draftId} · 修订版本 r${state.revision}（旧结论已随改稿清除）`;
-  const result = await api("POST", `/api/drafts/${state.draftId}/diagnose`);
+  let result;
+  try {
+    result = await api("POST", `/api/drafts/${state.draftId}/diagnose`);
+  } catch (err) {
+    if (err.status !== 409) return; // 其它错误已由 api() 展示
+    // 归因期间草稿被并发改稿（409）：本次基于旧修订的结论已作废，
+    // 不能把旧结论继续展示为当前结果，仅提示重新归因。
+    showError(null);
+    showStaleInvalidation();
+    return;
+  }
+  $("#banner-stale")?.remove();
   renderResult(result);
+}
+
+function showStaleInvalidation() {
+  $("#result-card").hidden = true;
+  $("#banner-stale")?.remove();
+  const banner = document.createElement("div");
+  banner.id = "banner-stale";
+  banner.className = "banner info";
+  banner.textContent =
+    "归因计算期间草稿已被修改，基于旧修订的结论已作废，未保存为当前草稿结果；请对当前草稿重新发起归因。";
+  $("#editor").appendChild(banner);
 }
 
 // ---------- 结果展示 ----------

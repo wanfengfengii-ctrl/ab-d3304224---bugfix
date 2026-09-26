@@ -24,7 +24,7 @@
 - 后端：FastAPI + Pydantic（独立 `api` 服务）
 - 前端：原生 HTML/CSS/JS 单页（`web/index.html`），由独立 Nginx `web` 服务
   托管并把 `/api/` 反代到后端；无构建步骤
-- 测试：pytest（引擎单测 + API 集成 + 规模上限）
+- 测试：pytest（引擎单测 + API 集成 + 规模上限 + 并发改稿回归，19 项）
 - 冒烟：`scripts/smoke.py` 用标准库对运行中的服务跑完整业务链路
 
 ## 快速开始（Docker Compose）
@@ -73,7 +73,7 @@ BASE_URL=http://127.0.0.1:8000 python scripts/smoke.py
 | `POST /api/drafts` | 创建草稿（严格校验所有业务约束） |
 | `GET /api/drafts/{id}` | 查看草稿（含修订号与当前结论） |
 | `PUT /api/drafts/{id}` | 修改草稿：修订号 +1 并清除旧结论 |
-| `POST /api/drafts/{id}/diagnose` | 对当前草稿发起归因并保存结论 |
+| `POST /api/drafts/{id}/diagnose` | 对当前草稿发起归因并保存结论（改稿后并发到达的旧归因返回 409、不落库） |
 | `GET /api/drafts/{id}/diagnosis` | 查询最近一次归因（无结论时 409） |
 | `POST /api/diagnose` | 无状态归因（直接提交、直接计算） |
 
@@ -91,13 +91,13 @@ BASE_URL=http://127.0.0.1:8000 python scripts/smoke.py
 app/               FastAPI 应用
   engine.py        故障组合枚举、逐轮可达性、三级择优（核心引擎）
   schemas.py       Pydantic 模型与跨字段一致性校验
-  storage.py       内存草稿存储（修订号 + 改稿作废结论）
+  storage.py       内存草稿存储（修订号 + 改稿作废结论；归因代际防并发旧结果写回）
   routers.py       业务 API
   main.py          应用入口（/health、/api/health；本地开发时顺带托管页面）
 web/               单页录入界面
   index.html
   nginx.conf       Web 容器站点配置（静态托管 + /api 反代 + /health）
-tests/             pytest 测试（17 项）
+tests/             pytest 测试（19 项，含并发改稿下旧归因不得写回的回归）
 scripts/           smoke.py 业务冒烟；verify.sh 验收入口
 Dockerfile         API 镜像（FastAPI/uvicorn，同时供 verify 使用）
 Dockerfile.web     Web 镜像（Nginx）

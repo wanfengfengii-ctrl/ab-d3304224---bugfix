@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from .engine import Diagnosis, diagnose
 from .schemas import NetworkPayload, build_network
-from .storage import DraftRecord, store
+from .storage import DraftView, store
 
 router = APIRouter(prefix="/api")
 
@@ -47,7 +47,7 @@ def diagnosis_to_dict(d: Diagnosis) -> dict[str, Any]:
     }
 
 
-def _record_to_dict(rec: DraftRecord) -> dict[str, Any]:
+def _record_to_dict(rec: DraftView) -> dict[str, Any]:
     return {
         "id": rec.id,
         "revision": rec.revision,
@@ -83,7 +83,7 @@ def create_draft(body: dict) -> dict:
 
 @router.get("/drafts/{draft_id}")
 def get_draft(draft_id: str) -> dict:
-    rec = store.get(draft_id)
+    rec = store.snapshot(draft_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="草稿不存在")
     return _record_to_dict(rec)
@@ -91,7 +91,7 @@ def get_draft(draft_id: str) -> dict:
 
 @router.put("/drafts/{draft_id}")
 def update_draft(draft_id: str, body: dict) -> dict:
-    if store.get(draft_id) is None:
+    if not store.exists(draft_id):
         raise HTTPException(status_code=404, detail="草稿不存在")
     payload = _parse_payload(body)
     rec = store.update(draft_id, payload)
@@ -101,26 +101,38 @@ def update_draft(draft_id: str, body: dict) -> dict:
 
 @router.post("/drafts/{draft_id}/diagnose")
 def run_diagnosis(draft_id: str) -> dict:
-    """对当前草稿发起归因；结论绑定当前修订号。"""
-    rec = store.get(draft_id)
-    if rec is None:
+    """对当前草稿发起归因；结论只在草稿仍是同一修订时写回。
+
+    归因计算期间若草稿被修改（修订号递增），本次结果按旧修订作废，
+    不会成为新草稿的保存结论；当前修订没有自己的结论时查询仍返回 409。
+    """
+    view = store.begin_diagnosis(draft_id)
+    if view is None:
         raise HTTPException(status_code=404, detail="草稿不存在")
-    network = build_network(rec.payload)
+    revision = view.revision
+    network = build_network(view.payload)
     result = diagnose(network)
     payload = diagnosis_to_dict(result)
-    payload["revision"] = rec.revision
-    store.attach_diagnosis(draft_id, payload)
+    payload["revision"] = revision
+    saved = store.finish_diagnosis(draft_id, revision, payload)
+    if saved is None:
+        # 归因期间草稿已被更新为新修订：旧结果不得作为当前草稿结论
+        raise HTTPException(
+            status_code=409,
+            detail="草稿已在归因期间被修改（修订已更新），本次基于旧修订的"
+                   "归因结果已作废，请对当前草稿重新发起归因",
+        )
     return payload
 
 
 @router.get("/drafts/{draft_id}/diagnosis")
 def get_diagnosis(draft_id: str) -> dict:
-    rec = store.get(draft_id)
-    if rec is None:
+    view = store.snapshot(draft_id)
+    if view is None:
         raise HTTPException(status_code=404, detail="草稿不存在")
-    if rec.diagnosis is None:
+    if view.diagnosis is None:
         raise HTTPException(status_code=409, detail="当前草稿尚无归因结论，请先发起归因")
-    return rec.diagnosis
+    return view.diagnosis
 
 
 @router.post("/diagnose")
